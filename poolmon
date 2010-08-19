@@ -1,0 +1,254 @@
+#!/usr/bin/perl
+#
+# Director mailserver pool monitoring script, meant to roughly duplicate the
+# functionality of the F5 node health monitors. This script can be safely run
+# on more than one director simultaneously, although differences in node 
+# reachability may result in mailserver weight flapping.
+#
+# Consult the help text for more details on functionality.
+#
+# Brandon Davidson <brandond@uoregon.edu> - 2010-09-19
+# TODO: Fork for SSL checks instead of disabling parallelism?
+
+use strict;
+use threads;
+use Getopt::Long;
+use IO::Socket::UNIX;
+use IO::Socket::INET;
+use IO::Socket::SSL;
+use POSIX qw(setsid strftime);
+
+$SIG{'PIPE'} = 'IGNORE';
+
+my @PORTS;
+my @SSL_PORTS;
+my $DEBUG    = 0;
+my $NOFORK   = 0;
+my $TIMEOUT  = 5;
+my $INTERVAL = 20;
+my $PIDOPEN  = 0;
+my $PIDFILE  = '/var/run/poolmon.pid';
+my $LOGFILE  = '/var/log/poolmon.log';
+
+GetOptions('port=i'	  => \@PORTS,
+	   'ssl=i'	  => \@SSL_PORTS,
+	   'debug'	  => \$DEBUG,
+	   'timeout=i'	  => \$TIMEOUT,
+	   'l|logfile=s'  => \$LOGFILE,
+	   'k|lockfile=s' => \$PIDFILE,
+	   'interval=i'   => \$INTERVAL,
+	   'foreground'	  => \$NOFORK,
+	   'help|?'	  => \&help,
+	) or help();
+
+unless (@PORTS || @SSL_PORTS){
+	@PORTS = qw(110 143);
+}
+
+check_pidfile();
+unless($NOFORK){
+	daemonize();
+}
+
+while(1){
+	scan_host_loop();
+	sleep($INTERVAL);
+}
+exit(0);
+
+### It's subroutines, all the way down.
+
+# Print help text and exit
+sub help {
+	print "Usage: $0 [<args>]
+Retrieves a set of mailserver hosts from a Dovecot director and performs multi-
+threaded parallel checks against a list of ports. 
+
+If any port on a host cannot be connected to or fails to present a banner line
+within the timeout period, that host is disabled by setting the weight (or vhost
+count, in Dovecot terms) to 0, and flushing active mappings from that host. If
+a disabled host passes all host checks, its weight is restored to 100.
+
+Note that use of SSL checks will disable multi-threading and fall back to
+serial host processing due to Perl's Net::SSLeay module not being thread-safe.
+
+Arguments:
+  -d, --debug		Show additional logging (default: false)
+  -f, --foreground	Run in foreground (default: false)
+  -h, --help		This text
+  -i, --interval=SECS	Scan interval in seconds (default: 20)
+  -k, --lockfile=PATH	PID/lockfile location (default: /var/run/poolmon.pid)
+  -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
+  -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
+  -s  --ssl=PORT	Port to check using SSL/TLS; repeat for multiple (default: none)
+  -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
+";
+	exit(1);
+}
+
+# Get list of mailservers from local director and scan them
+sub scan_host_loop {
+	# Get mailserver list
+	my $sock = director_connect() || return;
+	my @lines;
+	print $sock "HOST-LIST\n";
+	while(my $line = readline($sock)){
+		last if $line == "\n";
+		chomp $line;
+		push(@lines, $line);
+	}
+	close($sock);
+	# Start host scans
+	foreach my $line (@lines){
+		if(my ($host, $weight, $clients) = split("\t", $line)){
+			if(@SSL_PORTS){
+				scan_host($host, $weight);
+			} else {
+				threads->create(\&scan_host, $host, $weight)->detach();
+			}
+		}
+	}
+}
+
+# Connect to local director and perform version handshake
+sub director_connect {
+	my $HANDSHAKE = "VERSION\tdirector-doveadm\t1\t0\n";
+	my $sock = new IO::Socket::UNIX('/var/run/dovecot/director-admin');
+	if ($sock) {
+		print $sock $HANDSHAKE;
+		unless (readline($sock) == $HANDSHAKE){
+			warn "Director handshake failed!";
+			close($sock);
+		}
+	} else {
+		warn "Failed to connect to director: $!";
+	}
+	return $sock;
+}
+
+# Scan a host and take corrective action if necessary
+sub scan_host {
+	my ($host, $weight) = @_;
+	my $OK = 1;
+	foreach my $port (@PORTS){
+		my $sock = IO::Socket::INET->new(PeerAddr => $host,
+						 PeerPort => $port,
+						 Timeout  => $TIMEOUT);
+
+		if ($sock && readline($sock)){
+			$DEBUG && write_log("$host:$port OK");
+		} else {
+			$DEBUG && write_log("$host:$port Failed");
+			$OK = 0;
+			last;
+		}
+		$sock && $sock->close();
+	}
+
+	# Skip SSL checks if standard checks indicated failure	
+	goto HOSTACTION unless $OK;
+	foreach my $port (@SSL_PORTS){
+		my $sock = IO::Socket::SSL->new(PeerAddr => $host,
+						PeerPort => $port,
+						Timeout  => $TIMEOUT);
+
+		if ($sock && readline($sock)){
+			$DEBUG && write_log("$host:$port OK (SSL)");
+		} else {
+			$DEBUG && write_log("$host:$port Failed (SSL)");
+			$OK = 0;
+			last;
+		}
+		$sock && $sock->close(SSL_ctx_free => 1);
+	}
+
+	# Take action based on check results
+	HOSTACTION:
+	if ($OK) { # Enable host if currently disabled (weighted 0)
+		$weight || enable_host($host);
+	} else {  # Disable host if currently enabled (weighted non-0)
+		$weight && disable_host($host);
+	}
+}
+
+# Set weight to 0 and flush associations
+# Note that there's no way to kill active sessions, they'll have to time out
+# on their own.
+sub disable_host {
+	my $host = shift || return;
+	my $sock = director_connect() || return;
+	print $sock "HOST-SET\t$host\t0\n";
+	print $sock "HOST-FLUSH\t$host\n";
+	close($sock);
+	write_log("$host disabled");
+}
+
+# Restore weight to 100
+sub enable_host {
+	my $host = shift || return;
+	my $sock = director_connect() || return;
+	print $sock "HOST-SET\t$host\t100\n";
+	close($sock);
+	write_log("$host enabled");
+}
+
+# Append a line to the log
+sub write_log {
+	printf("%s %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
+}
+
+# Check to see if the pidfile exists and the indicated pid is still running
+sub check_pidfile {
+	if (-e $PIDFILE){
+		my $FH;
+		open($FH, "<$PIDFILE");
+		my $oldpid = readline($FH);
+		close($FH);
+		chomp $oldpid;
+		if (-d "/proc/$oldpid"){
+			print STDERR "Error: already running as pid $oldpid\n";
+			exit(1);
+		}
+	}
+}
+
+# Remove the pidfile and exit
+sub remove_pidfile {
+		return unless $PIDOPEN;
+		write_log('shutting down');
+		unlink($PIDFILE);
+		exit(0);
+}
+
+# Fork into background and write pidfile
+sub daemonize {
+	my $FH;
+
+	# Open pidfile and register cleanup handlers
+	# Do this before forking so we can abort on failure
+	$PIDOPEN = open($FH, ">$PIDFILE") or die "Can't open pidfile $PIDFILE: $!";
+	$SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = $SIG{'__DIE__'} = \&remove_pidfile;
+
+	# Disconnect from terminal and session
+	chdir('/')                 or die "Can't chdir to /: $!";
+	umask(0);
+	open(STDIN, '</dev/null')  or die "Can't read /dev/null: $!";
+	open(STDOUT, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
+	open(STDERR, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
+	defined(my $pid = fork())  or die "Can't fork: $!";
+	$pid && exit(0);
+	setsid()                   or die "Can't start a new session: $!";
+
+	# Write forked PID to pidfile and startup message to log
+	write_log("forked to background as PID $$");
+	print $FH "$$\n";
+	close($FH);
+
+	# Reopen logfiles on HUP
+	$SIG{'HUP'} = sub {
+		open(STDOUT, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
+		open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
+		write_log("logfile reopened");
+	}
+}
+
