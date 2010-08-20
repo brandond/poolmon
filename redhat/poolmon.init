@@ -29,7 +29,7 @@ if [ -f /etc/sysconfig/poolmon -a $UID -eq 0 ]; then
 fi
 
 RETVAL=0
-prog="Poolmin"
+prog="Poolmon"
 exec="/usr/sbin/poolmon"
 pidfile="/var/run/poolmon.pid"
 lockfile="/var/lock/subsys/poolmon"
