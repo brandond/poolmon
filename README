@@ -1,7 +1,7 @@
 Poolmon is a director mailserver pool monitoring script for Dovecot, meant to
 roughly duplicate the functionality of node health monitors on dedicated load-
-balancers like Linux LVS or F5 BigIP hardware. This script can be safely run
-on more than one director simultaneously, although differences in node 
-reachability may result in mailserver weight flapping.
+balancers like LVS or F5 BigIP LTM. This script can be safely run on more than
+one director host simultaneously, although differences in node reachability may
+result in mailserver vhost count flapping.
 
 Consult the help text for more details on functionality.

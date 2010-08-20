@@ -1,9 +1,10 @@
 #!/usr/bin/perl
 #
 # Director mailserver pool monitoring script, meant to roughly duplicate the
-# functionality of the F5 node health monitors. This script can be safely run
-# on more than one director simultaneously, although differences in node 
-# reachability may result in mailserver weight flapping.
+# functionality of node health monitors on dedicated load-balancers like LVS or
+# F5 BigIP LTM. This script can be safely run on more than one director host 
+# simultaneously, although differences in node reachability may result in
+# mailserver vhost count flapping.
 #
 # Consult the help text for more details on functionality.
 #
