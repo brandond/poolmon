@@ -92,7 +92,7 @@ Arguments:
   -k, --lockfile=PATH	PID/lockfile location (default: /var/run/poolmon.pid)
   -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
   -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
-  -s  --ssl=PORT	Port to check using SSL/TLS; repeat for multiple (default: none)
+  -s  --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
   -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
 ";
 	exit(1);
@@ -129,11 +129,11 @@ sub director_connect {
 	if ($sock) {
 		print $sock $HANDSHAKE;
 		unless (readline($sock) == $HANDSHAKE){
-			warn "Director handshake failed!";
+			write_err("Director handshake failed!");
 			close($sock);
 		}
 	} else {
-		warn "Failed to connect to director: $!";
+		write_err("Failed to connect to director: $!");
 	}
 	return $sock;
 }
@@ -204,9 +204,14 @@ sub enable_host {
 	write_log("$host enabled");
 }
 
-# Append a line to the log
+# Append a line to stdout
 sub write_log {
-	printf("%s %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
+	printf(STDOUT "%s LOG %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
+}
+
+# Append a line to stderr
+sub write_err {
+	printf(STDERR "%s ERR %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
 }
 
 # Check to see if the pidfile exists and the indicated pid is still running
