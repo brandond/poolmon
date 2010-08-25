@@ -42,6 +42,8 @@ my $INTERVAL = 20;
 my $PIDOPEN  = 0;
 my $PIDFILE  = '/var/run/poolmon.pid';
 my $LOGFILE  = '/var/log/poolmon.log';
+my $WEIGHTS  = '';
+my %WEIGHTS;
 
 GetOptions('port=i'	  => \@PORTS,
 	   'ssl=i'	  => \@SSL_PORTS,
@@ -52,6 +54,7 @@ GetOptions('port=i'	  => \@PORTS,
 	   'interval=i'   => \$INTERVAL,
 	   'foreground'	  => \$NOFORK,
 	   'help|?'	  => \&help,
+	   'weights=s'    => \&opt_weights,
 	) or help();
 
 unless (@PORTS || @SSL_PORTS){
@@ -80,7 +83,7 @@ threaded parallel checks against a list of ports.
 If any port on a host cannot be connected to or fails to present a banner line
 within the timeout period, that host is disabled by setting the weight (or vhost
 count, in Dovecot terms) to 0, and flushing active mappings from that host. If
-a disabled host passes all host checks, its weight is restored to 100.
+a disabled host passes all host checks, its weight is restored.
 
 Note that use of SSL checks will disable multi-threading and fall back to
 serial host processing due to Perl's Net::SSLeay module not being thread-safe.
@@ -95,6 +98,8 @@ Arguments:
   -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
   -s  --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
   -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
+  -w, --weights=PATH	Location of file containing host:weight lines
+			If not set or no entry is found, weight defaults to 100
 ";
 	exit(1);
 }
@@ -196,11 +201,12 @@ sub disable_host {
 	write_log("$host disabled");
 }
 
-# Restore weight to 100
+# Restore weight
 sub enable_host {
 	my $host = shift || return;
 	my $sock = director_connect() || return;
-	print $sock "HOST-SET\t$host\t100\n";
+	my $weight = $WEIGHTS{$host} || 100;
+	print $sock "HOST-SET\t$host\t$weight\n";
 	close($sock);
 	write_log("$host enabled");
 }
@@ -238,6 +244,56 @@ sub remove_pidfile {
 		exit(0);
 }
 
+sub opt_weights {
+	my ($opt, $value) = @_;
+	if ( -e $value ){
+		$WEIGHTS = $value;
+		load_weights();
+	} else {
+		print STDERR "Error: weights file '$value' not found!\n";
+		exit(1);
+	}
+}
+
+# Parse weights file
+sub load_weights {
+	my $FH;
+	open($FH, "<$WEIGHTS");
+	if ($FH){
+		my $i = 0;
+		undef(%WEIGHTS);
+		while (my $line = readline($FH)){
+			$i++;
+			if ($line =~ m/^\s*#/){
+				# Skip comments
+				next;
+			} elsif (my ($ip, $weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
+				# ip entry
+				$DEBUG && write_log("adding $ip with weight $weight"); 
+				$WEIGHTS{$ip} = $weight;
+			} elsif (my ($hostname, $weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
+				# hostname entry
+				my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
+				if (@addrs){
+					foreach my $addr (@addrs){
+						my $ip = join('.', unpack('C4',$addr));
+						$DEBUG && write_log("adding $hostname\[$ip\] with weight $weight");
+						$WEIGHTS{$ip} = $weight;
+					}
+				} else {
+					write_err("failed to lookup weight entry '$hostname' at $WEIGHTS:$i");
+				}
+			} else {
+				# Complain about unmatched lines
+				write_err("ignoring malformed weight entry at $WEIGHTS:$i");
+			}
+		}
+		write_log('loaded '.scalar(keys(%WEIGHTS))." weights from $WEIGHTS");
+	} else {
+		write_err("couldn't open weights file: $!");
+	}
+}
+
 # Fork into background and write pidfile
 sub daemonize {
 	my $FH;
@@ -262,11 +318,12 @@ sub daemonize {
 	print $FH "$$\n";
 	close($FH);
 
-	# Reopen logfiles on HUP
+	# Reopen logfiles and reparse weights on HUP
 	$SIG{'HUP'} = sub {
 		open(STDOUT, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
-		open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
+		open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";		
 		write_log("logfile reopened");
+		load_weights();
 	}
 }
 
