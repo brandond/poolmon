@@ -1,5 +1,5 @@
 Name: poolmon
-Version:  0.2
+Version:  0.2.1
 Release:  1%{?dist}
 Summary: poolmon is a director mailserver pool monitoring script for Dovecot
 
@@ -38,6 +38,20 @@ cp %{SOURCE2} %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
 %clean
 rm -rf %{buildroot}
+
+%post
+/sbin/chkconfig --add %{name}
+
+%preun
+if [ "$1" -eq "0" ]; then
+	/sbin/service %{name} stop > /dev/null 2>&1
+	/sbin/chkconfig --del %{name}
+fi
+
+%postun
+if [ "$1" -ge "1" ]; then
+	/sbin/service %{name} condrestart >/dev/null 2>&1 || :
+fi
 
 %files
 %defattr(-,root,root,-)

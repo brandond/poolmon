@@ -39,7 +39,7 @@ start() {
 	[ -x $exec ] || exit 5
 
 	echo -n $"Starting $prog: "
-	$exec $OPTIONS
+	daemon --pidfile $pidfile $exec $OPTIONS
 	RETVAL=$?
 	[ $RETVAL -eq 0 ] && touch $lockfile
 	echo
