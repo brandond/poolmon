@@ -42,7 +42,7 @@ my $INTERVAL = 20;
 my $PIDOPEN  = 0;
 my $PIDFILE  = '/var/run/poolmon.pid';
 my $LOGFILE  = '/var/log/poolmon.log';
-my $WEIGHTS  = '';
+my $WEIGHTS;
 my %WEIGHTS;
 
 GetOptions('port=i'	  => \@PORTS,
@@ -257,9 +257,8 @@ sub opt_weights {
 
 # Parse weights file
 sub load_weights {
-	my $FH;
-	open($FH, "<$WEIGHTS");
-	if ($FH){
+	return unless $WEIGHTS;
+	if(open(my $FH, "<$WEIGHTS")){
 		my $i = 0;
 		undef(%WEIGHTS);
 		while (my $line = readline($FH)){
@@ -269,25 +268,26 @@ sub load_weights {
 				next;
 			} elsif (my ($ip, $weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
 				# ip entry
-				$DEBUG && write_log("adding $ip with weight $weight"); 
 				$WEIGHTS{$ip} = $weight;
+				$DEBUG && write_log("will use weight $weight for $ip"); 
 			} elsif (my ($hostname, $weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
 				# hostname entry
 				my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
 				if (@addrs){
 					foreach my $addr (@addrs){
 						my $ip = join('.', unpack('C4',$addr));
-						$DEBUG && write_log("adding $hostname\[$ip\] with weight $weight");
 						$WEIGHTS{$ip} = $weight;
+						$DEBUG && write_log("will use weight $weight for $hostname\[$ip\]");
 					}
 				} else {
-					write_err("failed to lookup weight entry '$hostname' at $WEIGHTS:$i");
+					write_err("failed to resolve hostname for weight entry '$hostname' at $WEIGHTS:$i");
 				}
 			} else {
 				# Complain about unmatched lines
 				write_err("ignoring malformed weight entry at $WEIGHTS:$i");
 			}
 		}
+		close($FH);
 		write_log('loaded '.scalar(keys(%WEIGHTS))." weights from $WEIGHTS");
 	} else {
 		write_err("couldn't open weights file: $!");
