@@ -42,6 +42,7 @@ my $INTERVAL = 20;
 my $PIDOPEN  = 0;
 my $PIDFILE  = '/var/run/poolmon.pid';
 my $LOGFILE  = '/var/log/poolmon.log';
+my $DIRECTOR = '/var/run/dovecot/director-admin';
 my $WEIGHTS;
 my %WEIGHTS;
 
@@ -53,6 +54,7 @@ GetOptions('port=i'	  => \@PORTS,
 	   'k|lockfile=s' => \$PIDFILE,
 	   'interval=i'   => \$INTERVAL,
 	   'foreground'	  => \$NOFORK,
+	   'S|socket'     => \$DIRECTOR,
 	   'help|?'	  => \&help,
 	   'weights=s'    => \&opt_weights,
 	) or help();
@@ -97,6 +99,8 @@ Arguments:
   -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
   -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
   -s  --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
+  -S, --socket=PATH	Path to Dovecot director-admin socket (default: 
+			/var/run/dovecot/director-admin)
   -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
   -w, --weights=PATH	Location of file containing host:weight lines
 			If not set or no entry is found, weight defaults to 100
@@ -131,7 +135,7 @@ sub scan_host_loop {
 # Connect to local director and perform version handshake
 sub director_connect {
 	my $HANDSHAKE = "VERSION\tdirector-doveadm\t1\t0\n";
-	my $sock = new IO::Socket::UNIX('/var/run/dovecot/director-admin');
+	my $sock = new IO::Socket::UNIX($DIRECTOR);
 	if ($sock) {
 		print $sock $HANDSHAKE;
 		unless (readline($sock) == $HANDSHAKE){
