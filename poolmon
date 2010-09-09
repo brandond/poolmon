@@ -54,7 +54,7 @@ GetOptions('port=i'	  => \@PORTS,
 	   'k|lockfile=s' => \$PIDFILE,
 	   'interval=i'   => \$INTERVAL,
 	   'foreground'	  => \$NOFORK,
-	   'S|socket'     => \$DIRECTOR,
+	   'S|socket=s'   => \$DIRECTOR,
 	   'help|?'	  => \&help,
 	   'weights=s'    => \&opt_weights,
 	) or help();
