@@ -115,7 +115,7 @@ sub scan_host_loop {
 	my @lines;
 	print $sock "HOST-LIST\n";
 	while(my $line = readline($sock)){
-		last if $line == "\n";
+		last if $line eq "\n";
 		chomp $line;
 		push(@lines, $line);
 	}
@@ -138,7 +138,7 @@ sub director_connect {
 	my $sock = new IO::Socket::UNIX($DIRECTOR);
 	if ($sock) {
 		print $sock $HANDSHAKE;
-		unless (readline($sock) == $HANDSHAKE){
+		unless (readline($sock) eq $HANDSHAKE){
 			write_err("Director handshake failed!");
 			close($sock);
 		}
@@ -270,18 +270,18 @@ sub load_weights {
 			if ($line =~ m/^\s*#/){
 				# Skip comments
 				next;
-			} elsif (my ($ip, $weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
+			} elsif (my ($ip, $ip_weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
 				# ip entry
-				$WEIGHTS{$ip} = $weight;
-				$DEBUG && write_log("will use weight $weight for $ip"); 
-			} elsif (my ($hostname, $weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
+				$WEIGHTS{$ip} = $ip_weight;
+				$DEBUG && write_log("will use weight $ip_weight for $ip"); 
+			} elsif (my ($hostname, $host_weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
 				# hostname entry
 				my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
 				if (@addrs){
 					foreach my $addr (@addrs){
 						my $ip = join('.', unpack('C4',$addr));
-						$WEIGHTS{$ip} = $weight;
-						$DEBUG && write_log("will use weight $weight for $hostname\[$ip\]");
+						$WEIGHTS{$ip} = $host_weight;
+						$DEBUG && write_log("will use weight $host_weight for $hostname\[$ip\]");
 					}
 				} else {
 					write_err("failed to resolve hostname for weight entry '$hostname' at $WEIGHTS:$i");
