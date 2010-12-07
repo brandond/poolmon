@@ -24,7 +24,6 @@
 ###
 
 use strict;
-use threads;
 use Getopt::Long;
 use IO::Socket::UNIX;
 use IO::Socket::INET;
@@ -79,16 +78,13 @@ exit(0);
 # Print help text and exit
 sub help {
 	print "Usage: $0 [<args>]
-Retrieves a set of mailserver hosts from a Dovecot director and performs multi-
-threaded parallel checks against a list of ports. 
+Retrieves a set of mailserver hosts from a Dovecot director and performs 
+parallel checks against a list of ports. 
 
 If any port on a host cannot be connected to or fails to present a banner line
 within the timeout period, that host is disabled by setting the weight (or vhost
 count, in Dovecot terms) to 0, and flushing active mappings from that host. If
 a disabled host passes all host checks, its weight is restored.
-
-Note that use of SSL checks will disable multi-threading and fall back to
-serial host processing due to Perl's Net::SSLeay module not being thread-safe.
 
 Arguments:
   -d, --debug		Show additional logging (default: false)
@@ -113,6 +109,7 @@ sub scan_host_loop {
 	# Get mailserver list
 	my $sock = director_connect() || return;
 	my @lines;
+	my %CHILDREN;
 	print $sock "HOST-LIST\n";
 	while(my $line = readline($sock)){
 		last if $line eq "\n";
@@ -120,15 +117,32 @@ sub scan_host_loop {
 		push(@lines, $line);
 	}
 	close($sock);
+	undef($sock);
 	# Start host scans
 	foreach my $line (@lines){
 		if(my ($host, $weight, $clients) = split("\t", $line)){
-			if(@SSL_PORTS){
-				scan_host($host, $weight);
+			my $pid = fork();
+			if ($pid == 0) {
+				exit(scan_host($host, $weight));
+			} elsif ($pid > 0) {
+				$CHILDREN{$pid} = [$host, $weight];
 			} else {
-				threads->create(\&scan_host, $host, $weight)->detach();
+				write_err("Failed to fork scan process for host $host: $!");
 			}
 		}
+	}
+	# Take action based on check results returned by subprocesses
+	while(my $pid = wait()){
+		my $OK = $? >> 8;
+		last if $pid == -1;
+		my ($host, $weight) = @{$CHILDREN{$pid}};
+		$DEBUG && write_log("Scan of host $host with weight $weight by PID $pid exited with status $OK");
+		if ($OK) { # Enable host if currently disabled (weighted 0)
+			$weight || enable_host($host);
+		} else {  # Disable host if currently enabled (weighted non-0)
+			$weight && disable_host($host);
+		}
+		undef($CHILDREN{$pid});
 	}
 }
 
@@ -166,9 +180,8 @@ sub scan_host {
 		}
 		$sock && $sock->close();
 	}
-
 	# Skip SSL checks if standard checks indicated failure	
-	goto HOSTACTION unless $OK;
+	return 0 unless $OK;
 	foreach my $port (@SSL_PORTS){
 		my $sock = IO::Socket::SSL->new(PeerAddr => $host,
 						PeerPort => $port,
@@ -183,14 +196,7 @@ sub scan_host {
 		}
 		$sock && $sock->close(SSL_ctx_free => 1);
 	}
-
-	# Take action based on check results
-	HOSTACTION:
-	if ($OK) { # Enable host if currently disabled (weighted 0)
-		$weight || enable_host($host);
-	} else {  # Disable host if currently enabled (weighted non-0)
-		$weight && disable_host($host);
-	}
+	return $OK;
 }
 
 # Set weight to 0 and flush associations
@@ -202,6 +208,7 @@ sub disable_host {
 	print $sock "HOST-SET\t$host\t0\n";
 	print $sock "HOST-FLUSH\t$host\n";
 	close($sock);
+	undef($sock);
 	write_log("$host disabled");
 }
 
@@ -212,6 +219,7 @@ sub enable_host {
 	my $weight = $WEIGHTS{$host} || 100;
 	print $sock "HOST-SET\t$host\t$weight\n";
 	close($sock);
+	undef($sock);
 	write_log("$host enabled");
 }
 
