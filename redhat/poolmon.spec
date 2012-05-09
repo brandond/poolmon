@@ -13,6 +13,7 @@ Source2: http://github.com/brandond/%{name}/raw/%{version}/redhat/poolmon.syscon
 BuildArch: noarch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 Requires: dovecot
+Requires: perl(IO::Socket::SSL)
 
 %description
 Poolmon is a director mailserver pool monitoring script for Dovecot, meant to

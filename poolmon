@@ -33,32 +33,60 @@ $SIG{'PIPE'} = 'IGNORE';
 
 my @PORTS;
 my @SSL_PORTS;
+my @IMAP_PORTS;
+my @IMAPS_PORTS;
 my $DEBUG    = 0;
 my $NOFORK   = 0;
 my $TIMEOUT  = 5;
-my $INTERVAL = 20;
+my $INTERVAL = 30;
 my $PIDOPEN  = 0;
 my $PIDFILE  = '/var/run/poolmon.pid';
 my $LOGFILE  = '/var/log/poolmon.log';
 my $DIRECTOR = '/var/run/dovecot/director-admin';
+my $CREDFILE = '';
+my $USERNAME = '';
+my $PASSWORD = '';
 my $WEIGHTS;
 my %WEIGHTS;
 
 GetOptions('port=i'	  => \@PORTS,
-	   'ssl=i'	  => \@SSL_PORTS,
-	   'debug'	  => \$DEBUG,
-	   'timeout=i'	  => \$TIMEOUT,
+	   'ssl=i'        => \@SSL_PORTS,
+	   'imap=i'       => \@IMAP_PORTS,
+	   'imaps=i'      => \@IMAPS_PORTS,
+	   'credfile=s'	  => \$CREDFILE,
+	   'd|debug'      => \$DEBUG,
+	   't|timeout=i'  => \$TIMEOUT,
 	   'l|logfile=s'  => \$LOGFILE,
 	   'k|lockfile=s' => \$PIDFILE,
-	   'interval=i'   => \$INTERVAL,
-	   'foreground'	  => \$NOFORK,
+	   'i|interval=i' => \$INTERVAL,
+	   'f|foreground' => \$NOFORK,
 	   'S|socket=s'   => \$DIRECTOR,
-	   'help|?'	  => \&help,
-	   'weights=s'    => \&opt_weights,
+	   'help|?'	      => \&help,
+	   'w|weights=s'    => \&opt_weights,
 	) or help();
 
-unless (@PORTS || @SSL_PORTS){
+unless (@PORTS || @SSL_PORTS || @IMAP_PORTS || @IMAPS_PORTS){
 	@PORTS = qw(110 143);
+}
+
+if ($CREDFILE){
+	if (! -r $CREDFILE){
+		print STDERR "Error: could not open credential file $CREDFILE\n";
+	}
+	# Credentials file exists and can be read.
+	my $mode = (stat($CREDFILE))[2];
+	if ((stat($CREDFILE))[2] & 077){
+		print STDERR "Warning: You should really chmod 600 $CREDFILE\n";
+	}
+	open(my $credfh, "<", $CREDFILE);
+	$USERNAME = readline($credfh);
+	$PASSWORD = readline($credfh);
+	close($credfh);
+    chomp($USERNAME);
+	chomp($PASSWORD);
+	unless($USERNAME && $PASSWORD){
+		print STDERR "Error: could not parse username and password from $CREDFILE\n"
+	}
 }
 
 check_pidfile();
@@ -93,7 +121,15 @@ Arguments:
   -k, --lockfile=PATH	PID/lockfile location (default: /var/run/poolmon.pid)
   -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
   -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
-  -s  --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
+      --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
+      --credfile=PATH	File with credentials to authenticate as, mode 0600. (default: none)
+                          - Username on 1st line. 
+                          - Password on 2nd. 
+      --imap=PORT   	Port with IMAP; check will attempt to log in with creds from
+                    	--credfile (Requires Net::IMAP::Simple)
+      --imaps=PORT  	Port with IMAP with SSL forced; check will attempt to log 
+                    	in with creds from --credfile 
+                        (Requires Net::IMAP::Simple and Net::IMAP::Simple::SSL)
   -S, --socket=PATH	Path to Dovecot director-admin socket (default: 
 			/var/run/dovecot/director-admin)
   -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
@@ -194,6 +230,21 @@ sub scan_host {
 			last;
 		}
 		$sock && $sock->close(SSL_ctx_free => 1);
+	}
+	return 0 unless $OK;
+	foreach my $port (@IMAP_PORTS){
+		my $sock = IO::Socket::INET->new(PeerAddr => $host,
+						 PeerPort => $port,
+						 Timeout  => $TIMEOUT);
+
+		if ($sock && readline($sock)){
+			$DEBUG && write_log("$host:$port OK");
+		} else {
+			$DEBUG && write_log("$host:$port Failed");
+			$OK = 0;
+			last;
+		}
+		$sock && $sock->close();
 	}
 	return $OK;
 }
