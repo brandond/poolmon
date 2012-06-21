@@ -1,5 +1,5 @@
 Name: poolmon
-Version:  0.4
+Version:  0.3
 Release:  1%{?dist}
 Summary: poolmon is a director mailserver pool monitoring script for Dovecot
 
@@ -61,8 +61,6 @@ fi
 %config %{_sysconfdir}/sysconfig/%{name}
 
 %changelog
-* Thu Jun 21 2012 Brandon Davidson <brad@oatmail.org>
-- Version bump to 0.4 with login health checks by <dfwarden@gmail.com>
 * Thu Aug 19 2010 Brandon Davidson <brandond@uoregon.edu>
-- Initial Package
+- Initial Package 
 

@@ -233,37 +233,18 @@ sub scan_host {
 	}
 	return 0 unless $OK;
 	foreach my $port (@IMAP_PORTS){
-		require Net::IMAP::Simple;
-		my $imap = Net::IMAP::Simple->new($host, port => $port, timeout => $TIMEOUT);
-		if (!$imap){
-			$DEBUG && write_log("$host:$port IMAP Failed");
+		my $sock = IO::Socket::INET->new(PeerAddr => $host,
+						 PeerPort => $port,
+						 Timeout  => $TIMEOUT);
+
+		if ($sock && readline($sock)){
+			$DEBUG && write_log("$host:$port OK");
+		} else {
+			$DEBUG && write_log("$host:$port Failed");
 			$OK = 0;
 			last;
 		}
-		my $authresult = $imap->login($USERNAME, $PASSWORD);
-		$imap->quit;
-		if (!$authresult){
-			$DEBUG && write_log("$host:$port IMAP AUTH Failed");
-			$OK = 0;
-			last;
-		}
-	}
-	return 0 unless $OK;
-	foreach my $port (@IMAPS_PORTS){
-		require Net::IMAP::Simple::SSL;
-		my $imap = Net::IMAP::Simple::SSL->new($host, port => $port, timeout => $TIMEOUT);
-		if (!$imap){
-			$DEBUG && write_log("$host:$port IMAPS Failed");
-			$OK = 0;
-			last;
-		}
-		my $authresult = $imap->login($USERNAME, $PASSWORD);
-		$imap->quit;
-		if (!$authresult){
-			$DEBUG && write_log("$host:$port IMAPS AUTH Failed");
-			$OK = 0;
-			last;
-		}
+		$sock && $sock->close();
 	}
 	return $OK;
 }
