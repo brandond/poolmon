@@ -9,7 +9,6 @@
 # Consult the help text for more details on functionality.
 #
 # Brandon Davidson <brandond@uoregon.edu> - 2010-09-19
-# TODO: Fork for SSL checks instead of disabling parallelism?
 # 
 ### License:
 # This program is free software; you can redistribute it and/or modify it 
@@ -216,21 +215,21 @@ sub disable_host {
 sub enable_host {
 	my $host = shift || return;
 	my $sock = director_connect() || return;
-	my $weight = $WEIGHTS{$host} || 100;
+	my $weight = exists $WEIGHTS{$host} ? $WEIGHTS{$host} : 100;
 	print $sock "HOST-SET\t$host\t$weight\n";
 	close($sock);
 	undef($sock);
-	write_log("$host enabled");
+	write_log("$host enabled with weight $weight");
 }
 
 # Append a line to stdout
 sub write_log {
-	printf(STDOUT "%s LOG %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
+	printf(STDOUT "%s LOG %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
 }
 
 # Append a line to stderr
 sub write_err {
-	printf(STDERR "%s ERR %s\n", strftime("%h %d %H:%m:%S", localtime()), join('', @_));
+	printf(STDERR "%s ERR %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
 }
 
 # Check to see if the pidfile exists and the indicated pid is still running
