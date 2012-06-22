@@ -24,6 +24,7 @@
 
 use strict;
 use Getopt::Long;
+use Net::IMAP::Simple;
 use IO::Socket::UNIX;
 use IO::Socket::INET;
 use IO::Socket::SSL;
@@ -33,8 +34,6 @@ $SIG{'PIPE'} = 'IGNORE';
 
 my @PORTS;
 my @SSL_PORTS;
-my @IMAP_PORTS;
-my @IMAPS_PORTS;
 my $DEBUG    = 0;
 my $NOFORK   = 0;
 my $TIMEOUT  = 5;
@@ -51,9 +50,6 @@ my %WEIGHTS;
 
 GetOptions('port=i'	  => \@PORTS,
 	   'ssl=i'        => \@SSL_PORTS,
-	   'imap=i'       => \@IMAP_PORTS,
-	   'imaps=i'      => \@IMAPS_PORTS,
-	   'credfile=s'	  => \$CREDFILE,
 	   'd|debug'      => \$DEBUG,
 	   't|timeout=i'  => \$TIMEOUT,
 	   'l|logfile=s'  => \$LOGFILE,
@@ -61,32 +57,13 @@ GetOptions('port=i'	  => \@PORTS,
 	   'i|interval=i' => \$INTERVAL,
 	   'f|foreground' => \$NOFORK,
 	   'S|socket=s'   => \$DIRECTOR,
-	   'help|?'	      => \&help,
-	   'w|weights=s'    => \&opt_weights,
+	   'h|help|?'     => \&help,
+	   'w|weights=s'  => \&opt_weights,
+	   'c|credfile=s' => \&opt_credfile,
 	) or help();
 
-unless (@PORTS || @SSL_PORTS || @IMAP_PORTS || @IMAPS_PORTS){
+unless (@PORTS || @SSL_PORTS){
 	@PORTS = qw(110 143);
-}
-
-if ($CREDFILE){
-	if (! -r $CREDFILE){
-		print STDERR "Error: could not open credential file $CREDFILE\n";
-	}
-	# Credentials file exists and can be read.
-	my $mode = (stat($CREDFILE))[2];
-	if ((stat($CREDFILE))[2] & 077){
-		print STDERR "Warning: You should really chmod 600 $CREDFILE\n";
-	}
-	open(my $credfh, "<", $CREDFILE);
-	$USERNAME = readline($credfh);
-	$PASSWORD = readline($credfh);
-	close($credfh);
-    chomp($USERNAME);
-	chomp($PASSWORD);
-	unless($USERNAME && $PASSWORD){
-		print STDERR "Error: could not parse username and password from $CREDFILE\n"
-	}
 }
 
 check_pidfile();
@@ -117,19 +94,15 @@ Arguments:
   -d, --debug		Show additional logging (default: false)
   -f, --foreground	Run in foreground (default: false)
   -h, --help		This text
-  -i, --interval=SECS	Scan interval in seconds (default: 20)
+  -i, --interval=SECS	Scan interval in seconds (default: 30)
   -k, --lockfile=PATH	PID/lockfile location (default: /var/run/poolmon.pid)
   -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
   -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
       --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
-      --credfile=PATH	File with credentials to authenticate as, mode 0600. (default: none)
-                          - Username on 1st line. 
-                          - Password on 2nd. 
-      --imap=PORT   	Port with IMAP; check will attempt to log in with creds from
-                    	--credfile (Requires Net::IMAP::Simple)
-      --imaps=PORT  	Port with IMAP with SSL forced; check will attempt to log 
-                    	in with creds from --credfile 
-                        (Requires Net::IMAP::Simple and Net::IMAP::Simple::SSL)
+  -c  --credfile=PATH	File with credentials to authenticate as, mode 0600.
+                          - Username on 1st line.
+                          - Password on 2nd line.
+			If not set, health checks will not attempt authentication.
   -S, --socket=PATH	Path to Dovecot director-admin socket (default: 
 			/var/run/dovecot/director-admin)
   -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
@@ -197,75 +170,60 @@ sub director_connect {
 	return $sock;
 }
 
-# Scan a host and take corrective action if necessary
+# Scan all ports on a given host
 sub scan_host {
 	my ($host, $weight) = @_;
 	my $OK = 1;
+	# Check non-SSL ports first
 	foreach my $port (@PORTS){
-		my $sock = IO::Socket::INET->new(PeerAddr => $host,
-						 PeerPort => $port,
-						 Timeout  => $TIMEOUT);
-
-		if ($sock && readline($sock)){
-			$DEBUG && write_log("$host:$port OK");
-		} else {
-			$DEBUG && write_log("$host:$port Failed");
+		if (! scan_port($host, $port, 0)){
 			$OK = 0;
 			last;
 		}
-		$sock && $sock->close();
 	}
-	# Skip SSL checks if standard checks indicated failure	
+	# Skip SSL checks if standard checks indicated failure
 	return 0 unless $OK;
 	foreach my $port (@SSL_PORTS){
-		my $sock = IO::Socket::SSL->new(PeerAddr => $host,
-						PeerPort => $port,
-						Timeout  => $TIMEOUT);
-
-		if ($sock && readline($sock)){
-			$DEBUG && write_log("$host:$port OK (SSL)");
-		} else {
-			$DEBUG && write_log("$host:$port Failed (SSL)");
-			$OK = 0;
-			last;
-		}
-		$sock && $sock->close(SSL_ctx_free => 1);
-	}
-	return 0 unless $OK;
-	foreach my $port (@IMAP_PORTS){
-		require Net::IMAP::Simple;
-		my $imap = Net::IMAP::Simple->new($host, port => $port, timeout => $TIMEOUT);
-		if (!$imap){
-			$DEBUG && write_log("$host:$port IMAP Failed");
-			$OK = 0;
-			last;
-		}
-		my $authresult = $imap->login($USERNAME, $PASSWORD);
-		$imap->quit;
-		if (!$authresult){
-			$DEBUG && write_log("$host:$port IMAP AUTH Failed");
-			$OK = 0;
-			last;
-		}
-	}
-	return 0 unless $OK;
-	foreach my $port (@IMAPS_PORTS){
-		require Net::IMAP::Simple::SSL;
-		my $imap = Net::IMAP::Simple::SSL->new($host, port => $port, timeout => $TIMEOUT);
-		if (!$imap){
-			$DEBUG && write_log("$host:$port IMAPS Failed");
-			$OK = 0;
-			last;
-		}
-		my $authresult = $imap->login($USERNAME, $PASSWORD);
-		$imap->quit;
-		if (!$authresult){
-			$DEBUG && write_log("$host:$port IMAPS AUTH Failed");
+		if (! scan_port($host, $port, 1)){
 			$OK = 0;
 			last;
 		}
 	}
 	return $OK;
+}
+
+# Check a port on a host, with optional SSL and login
+sub scan_port {
+	my $host = shift || return;
+	my $port = shift || return;
+	my $ssl  = shift;
+	my $ok   = 1;
+	my $prot = $ssl ? 'IMAPS' : 'IMAP';
+	my $imap = Net::IMAP::Simple->new($host,
+					  port    => $port, 
+					  use_ssl => $ssl,
+					  timeout => $TIMEOUT,
+					  retry   => 0);
+
+	if ($imap){
+		$DEBUG && write_log("$host:$port $prot Connection OK");
+	} else {
+		$DEBUG && write_log("$host:$port $prot Connection Failed");
+		$ok = 0;
+	}
+
+	# Attempt to authenticate, if possible
+	if ($imap && $USERNAME && $PASSWORD){
+		my $authresult = $imap->login($USERNAME, $PASSWORD);
+		if ($authresult){
+			$DEBUG && write_log("$host:$port $prot AUTH OK");
+		} else {
+			$DEBUG && write_log("$host:$port $prot AUTH Failed");
+			$ok = 0;
+		}
+	}
+	$imap && $imap->quit();
+	return $ok;
 }
 
 # Set weight to 0 and flush associations
@@ -336,6 +294,41 @@ sub opt_weights {
 	}
 }
 
+sub opt_credfile {
+	my ($opt, $value)= @_;
+	if ( -e $value ){
+		$CREDFILE = $value;
+		load_credentials();
+	} else {
+		print STDERR "Error: credential file '$value' not found!\n";
+		exit(1);
+	}
+}
+
+sub load_credentials {
+	return unless $CREDFILE;
+	# Check permissions on credentials file
+	if ((stat($CREDFILE))[2] & 077){
+		write_err("WARNING: You should really chmod 600 $CREDFILE");
+	}
+	if(open(my $credfh, "<$CREDFILE")){
+		$USERNAME = readline($credfh);
+		$PASSWORD = readline($credfh);
+		close($credfh);
+		chomp($USERNAME);
+		chomp($PASSWORD);
+		if ($USERNAME && $PASSWORD){
+			$DEBUG && write_log("read credentials from $CREDFILE");
+		} else {
+			write_err("could not read username and password from $CREDFILE");
+		}
+	} else {
+		write_err("Error: could not open credential file: $!");
+	}
+}
+
+
+
 # Parse weights file
 sub load_weights {
 	return unless $WEIGHTS;
@@ -405,6 +398,7 @@ sub daemonize {
 		open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";		
 		write_log("logfile reopened");
 		load_weights();
+		load_credentials();
 	}
 }
 
