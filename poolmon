@@ -1,17 +1,18 @@
 #!/usr/bin/perl
+# vim: ai ts=4 sts=4 et sw=4
 #
 # Director mailserver pool monitoring script, meant to roughly duplicate the
 # functionality of node health monitors on dedicated load-balancers like LVS or
-# F5 BigIP LTM. This script can be safely run on more than one director host 
+# F5 BigIP LTM. This script can be safely run on more than one director host
 # simultaneously, although differences in node reachability may result in
 # mailserver vhost count flapping.
 #
 # Consult the help text for more details on functionality.
 #
-# Brandon Davidson <brandond@uoregon.edu> - 2010-09-19
-# 
+# Brandon Davidson <brad@oatmail.org>
+#
 ### License:
-# This program is free software; you can redistribute it and/or modify it 
+# This program is free software; you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by the
 # Free Software Foundation; either version 2, or (at your option) any
 # later version.
@@ -24,7 +25,6 @@
 
 use strict;
 use Getopt::Long;
-use Net::IMAP::Simple;
 use IO::Socket::UNIX;
 use IO::Socket::INET;
 use IO::Socket::SSL;
@@ -48,32 +48,33 @@ my $PASSWORD = '';
 my $WEIGHTS;
 my %WEIGHTS;
 
-GetOptions('port=i'	  => \@PORTS,
-	   'ssl=i'        => \@SSL_PORTS,
-	   'd|debug'      => \$DEBUG,
-	   't|timeout=i'  => \$TIMEOUT,
-	   'l|logfile=s'  => \$LOGFILE,
-	   'k|lockfile=s' => \$PIDFILE,
-	   'i|interval=i' => \$INTERVAL,
-	   'f|foreground' => \$NOFORK,
-	   'S|socket=s'   => \$DIRECTOR,
-	   'h|help|?'     => \&help,
-	   'w|weights=s'  => \&opt_weights,
-	   'c|credfile=s' => \&opt_credfile,
-	) or help();
+Getopt::Long::Configure("bundling");
+GetOptions('p|port=s'     => \@PORTS,
+           's|ssl=s'      => \@SSL_PORTS,
+           'd|debug'      => \$DEBUG,
+           't|timeout=i'  => \$TIMEOUT,
+           'l|logfile=s'  => \$LOGFILE,
+           'k|lockfile=s' => \$PIDFILE,
+           'i|interval=i' => \$INTERVAL,
+           'f|foreground' => \$NOFORK,
+           'S|socket=s'   => \$DIRECTOR,
+           'h|help|?'     => \&help,
+           'w|weights=s'  => \&opt_weights,
+           'c|credfile=s' => \&opt_credfile,
+    ) or help();
 
 unless (@PORTS || @SSL_PORTS){
-	@PORTS = qw(110 143);
+    @PORTS = qw(110 143);
 }
 
 check_pidfile();
 unless($NOFORK){
-	daemonize();
+    daemonize();
 }
 
 while(1){
-	scan_host_loop();
-	sleep($INTERVAL);
+    scan_host_loop();
+    sleep($INTERVAL);
 }
 exit(0);
 
@@ -81,9 +82,9 @@ exit(0);
 
 # Print help text and exit
 sub help {
-	print "Usage: $0 [<args>]
-Retrieves a set of mailserver hosts from a Dovecot director and performs 
-parallel checks against a list of ports. 
+    print "Usage: $0 [<args>]
+Retrieves a set of mailserver hosts from a Dovecot director and performs
+parallel checks against a list of ports.
 
 If any port on a host cannot be connected to or fails to present a banner line
 within the timeout period, that host is disabled by setting the weight (or vhost
@@ -91,314 +92,408 @@ count, in Dovecot terms) to 0, and flushing active mappings from that host. If
 a disabled host passes all host checks, its weight is restored.
 
 Arguments:
-  -d, --debug		Show additional logging (default: false)
-  -f, --foreground	Run in foreground (default: false)
-  -h, --help		This text
-  -i, --interval=SECS	Scan interval in seconds (default: 30)
-  -k, --lockfile=PATH	PID/lockfile location (default: /var/run/poolmon.pid)
-  -l, --logfile=PATH	Log file location (default: /var/log/poolmon.log)
-  -p, --port=PORT	Port to check; repeat for multiple (default: 110, 143)
-      --ssl=PORT 	Port with SSL/TLS; repeat for multiple (default: none)
-  -c  --credfile=PATH	File with credentials to authenticate as, mode 0600.
+  -d, --debug           Show additional logging (default: false)
+  -f, --foreground      Run in foreground (default: false)
+  -h, --help            This text
+  -i, --interval=SECS   Scan interval in seconds (default: 30)
+  -k, --lockfile=PATH   PID/lockfile location (default: /var/run/poolmon.pid)
+  -l, --logfile=PATH    Log file location (default: /var/log/poolmon.log)
+  -p, --port=PORT       Port to check; repeat for multiple (default: 110, 143)
+  -s  --ssl=PORT        Port with SSL/TLS; repeat for multiple (default: none)
+                        If the port is recognized as common IMAP or POP3 port,
+                        health checks will look for a valid connect banner.
+                        You can force a protocol (IMAP or POP3) by specifying
+                        it before the port, separated by a colon. Example:
+                          --port POP3:110 --ssl IMAP:993
+  -c  --credfile=PATH   File with credentials to authenticate as, mode 0600.
                           - Username on 1st line.
                           - Password on 2nd line.
-			If not set, health checks will not attempt authentication.
-  -S, --socket=PATH	Path to Dovecot director-admin socket (default: 
-			/var/run/dovecot/director-admin)
-  -t, --timeout=SECS	Port health check timeout in seconds (default: 5)
-  -w, --weights=PATH	Location of file containing host:weight lines
-			If not set or no entry is found, weight defaults to 100
+                        (default: health checks will not attempt authentication)
+  -S, --socket=PATH     Path to Dovecot director-admin socket 
+                        (default: /var/run/dovecot/director-admin)
+  -t, --timeout=SECS    Port health check timeout in seconds (default: 5)
+  -w, --weights=PATH    Location of file containing host:weight lines
+                        (default: weight of 100)
 ";
-	exit(1);
+    exit(1);
 }
 
 # Get list of mailservers from local director and scan them
 sub scan_host_loop {
-	# Get mailserver list
-	my $sock = director_connect() || return;
-	my @lines;
-	my %CHILDREN;
-	print $sock "HOST-LIST\n";
-	while(my $line = readline($sock)){
-		last if $line eq "\n";
-		chomp $line;
-		push(@lines, $line);
-	}
-	close($sock);
-	undef($sock);
-	# Start host scans
-	foreach my $line (@lines){
-		if(my ($host, $weight, $clients) = split("\t", $line)){
-			my $pid = fork();
-			if ($pid == 0) {
-				exit(scan_host($host, $weight));
-			} elsif ($pid > 0) {
-				$CHILDREN{$pid} = [$host, $weight];
-			} else {
-				write_err("Failed to fork scan process for host $host: $!");
-			}
-		}
-	}
-	# Take action based on check results returned by subprocesses
-	while(my $pid = wait()){
-		my $OK = $? >> 8;
-		last if $pid == -1;
-		my ($host, $weight) = @{$CHILDREN{$pid}};
-		$DEBUG && write_log("Scan of host $host with weight $weight by PID $pid exited with status $OK");
-		if ($OK) { # Enable host if currently disabled (weighted 0)
-			$weight || enable_host($host);
-		} else {  # Disable host if currently enabled (weighted non-0)
-			$weight && disable_host($host);
-		}
-		undef($CHILDREN{$pid});
-	}
+    # Get mailserver list
+    my $sock = director_connect() || return;
+    my @lines;
+    my %CHILDREN;
+    print $sock "HOST-LIST\n";
+    while(my $line = readline($sock)){
+        last if $line eq "\n";
+        chomp $line;
+        push(@lines, $line);
+    }
+    close($sock);
+    undef($sock);
+    $DEBUG && write_log('Director returned ',scalar(@lines),' hosts');
+
+    # Start host scans
+    foreach my $line (@lines){
+        if(my ($host, $weight, $clients) = split("\t", $line)){
+            my $pid = fork();
+            if ($pid == 0) {
+                exit(scan_host($host, $weight));
+            } elsif ($pid > 0) {
+                $CHILDREN{$pid} = [$host, $weight];
+            } else {
+                write_err("Failed to fork scan process for host $host: $!");
+            }
+        }
+    }
+
+    # Take action based on check results returned by subprocesses
+    while(my $pid = wait()){
+        my $OK = $? >> 8;
+        last if $pid == -1;
+        my ($host, $weight) = @{$CHILDREN{$pid}};
+        $DEBUG && write_log("Scan of host $host with weight $weight by PID $pid exited with status $OK");
+        if ($OK) { # Enable host if currently disabled (weighted 0)
+            $weight || enable_host($host);
+        } else {  # Disable host if currently enabled (weighted non-0)
+            $weight && disable_host($host);
+        }
+        undef($CHILDREN{$pid});
+    }
+    $DEBUG && write_log('Host scans complete');
 }
 
 # Connect to local director and perform version handshake
 sub director_connect {
-	my $HANDSHAKE = "VERSION\tdirector-doveadm\t1\t0\n";
-	my $sock = new IO::Socket::UNIX($DIRECTOR);
-	if ($sock) {
-		print $sock $HANDSHAKE;
-		unless (readline($sock) eq $HANDSHAKE){
-			write_err("Director handshake failed!");
-			close($sock);
-		}
-	} else {
-		write_err("Failed to connect to director: $!");
-	}
-	return $sock;
+    my $HANDSHAKE = "VERSION\tdirector-doveadm\t1\t0\n";
+    my $sock = new IO::Socket::UNIX($DIRECTOR);
+    if ($sock) {
+        print $sock $HANDSHAKE;
+        unless (readline($sock) eq $HANDSHAKE){
+            write_err("Director handshake failed!");
+            close($sock);
+        }
+    } else {
+        write_err("Failed to connect to director: $!");
+    }
+    return $sock;
 }
 
 # Scan all ports on a given host
 sub scan_host {
-	my ($host, $weight) = @_;
-	my $OK = 1;
-	# Check non-SSL ports first
-	foreach my $port (@PORTS){
-		if (! scan_port($host, $port, 0)){
-			$OK = 0;
-			last;
-		}
-	}
-	# Skip SSL checks if standard checks indicated failure
-	return 0 unless $OK;
-	foreach my $port (@SSL_PORTS){
-		if (! scan_port($host, $port, 1)){
-			$OK = 0;
-			last;
-		}
-	}
-	return $OK;
+    my ($host, $weight) = @_;
+    my $OK = 1;
+    # Check non-SSL ports first
+    foreach my $port (@PORTS){
+        if (! scan_port($host, $port, 0)){
+            $OK = 0;
+            last;
+        }
+    }
+    # Skip SSL checks if standard checks indicated failure
+    return 0 unless $OK;
+    foreach my $port (@SSL_PORTS){
+        if (! scan_port($host, $port, 1)){
+            $OK = 0;
+            last;
+        }
+    }
+    return $OK;
 }
 
 # Check a port on a host, with optional SSL and login
 sub scan_port {
-	my $host = shift || return;
-	my $port = shift || return;
-	my $ssl  = shift;
-	my $ok   = 1;
-	my $prot = $ssl ? 'IMAPS' : 'IMAP';
-	my $imap = Net::IMAP::Simple->new($host,
-					  port    => $port, 
-					  use_ssl => $ssl,
-					  timeout => $TIMEOUT,
-					  retry   => 0);
+    no strict 'subs';
+    my $host = shift || return;
+    my $port = shift || return;
+    my $ssl  = shift;
+    my $sock = $ssl ? IO::Socket::SSL : IO::Socket::INET;
+    my $prot;
+    my $ret;
 
-	if ($imap){
-		$DEBUG && write_log("$host:$port $prot Connection OK");
-	} else {
-		$DEBUG && write_log("$host:$port $prot Connection Failed");
-		$ok = 0;
-	}
+    ($port, $prot) = get_port_proto($port);
+    $sock = $sock->new(PeerAddr => $host,
+                       PeerPort => $port,
+                       Timeout  => $TIMEOUT);
 
-	# Attempt to authenticate, if possible
-	if ($imap && $USERNAME && $PASSWORD){
-		my $authresult = $imap->login($USERNAME, $PASSWORD);
-		if ($authresult){
-			$DEBUG && write_log("$host:$port $prot AUTH OK");
-		} else {
-			$DEBUG && write_log("$host:$port $prot AUTH Failed");
-			$ok = 0;
-		}
-	}
-	$imap && $imap->quit();
-	return $ok;
+    $ret = eval {
+        local $SIG{ALRM} = sub { die "Timeout\n" };
+        alarm $TIMEOUT;
+        if ($sock){
+            if ($prot eq 'IMAP'){
+                return scan_imap($host, $port, $sock);
+            } elsif ($prot eq 'POP3'){
+                return scan_pop3($host, $port, $sock);
+            } elsif (readline($sock)){
+                $DEBUG && write_log("$host:$port Connection OK");
+                return 1
+            }
+        } else {
+            $DEBUG && write_log("$host:$port Connection Failed");
+            return 0;
+        }
+        alarm 0;
+    };
+
+    if ($@){
+        $DEBUG && write_log("$host:$port Read Timeout");
+    }
+
+    return $ret;
+}
+
+sub scan_imap {
+    my $host = shift || return;
+    my $port = shift || return;
+    my $sock = shift || return;
+    my $line = readline($sock);
+    if ($line =~ m/LOGINDISABLED/){
+        write_err("$host:$port IMAP Server Reports Plaintext Login Disabled - check login_trusted_networks");
+        return 1;
+    } elsif ($line =~ m/^\* OK/){
+        if ($USERNAME && $PASSWORD){
+            printf $sock "01 LOGIN %s {%d}\r\n%s\r\n", $USERNAME, length($PASSWORD), $PASSWORD;
+            my $literal = readline($sock);
+            my $logstat = readline($sock);
+            if ($literal =~ m/^\+ OK/ && $logstat =~ m/^01 OK/){
+                $DEBUG && write_log("$host:$port IMAP Login OK");
+                return 1;
+            } else {
+                $DEBUG && write_log("$host:$port IMAP Login Failed");
+                $DEBUG && write_log("\t\t$logstat");
+                return 0;
+            }
+        } else {
+            printf $sock "01 LOGOUT\r\n";
+            $DEBUG && write_log("$host:$port IMAP Banner OK");
+            return 1;
+        }
+    } else {
+        $DEBUG && write_log("$host:$port IMAP Banner Check Failed");
+        return 0;
+    }
+}
+
+sub scan_pop3 {
+    my $host = shift || return;
+    my $port = shift || return;
+    my $sock = shift || return;
+    my $line = readline($sock);
+    if ($line =~ m/\+OK/){
+        if ($USERNAME && $PASSWORD){
+            printf $sock "USER %s\r\nPASS %s\r\n", $USERNAME, $PASSWORD;
+            my $userval = readline($sock);
+            my $logstat = readline($sock);
+            if ($userval =~ m/^-ERR Plaintext authentication disallowed/){
+                write_err("$host:$port POP3 Server Reports Plaintext Login Disabled - check login_trusted_networks");
+                return 1;
+            } elsif ($userval =~ m/^\+OK/ && $logstat =~ m/^\+OK/){
+                $DEBUG && write_log("$host:$port POP3 Login OK");
+                return 1;
+            } else {
+                $DEBUG && write_log("$host:$port POP3 Login Failed");
+                $DEBUG && write_log("\t\t$logstat");
+                return 0;
+        }
+        } else {
+            $DEBUG && write_log("$host:$port POP3 Banner OK");
+            return 1;
+        }
+    } else {
+        $DEBUG && write_log("$host:$port POP3 Banner Check Failed");
+        return 0;
+    }
+}
+
+# Extract port and protocol from combined port command-line option
+sub get_port_proto {
+    my $port = shift;
+
+    if ($port == 143 || $port == 993 || $port =~ m/IMAP:(\d+)/i){
+        $port = $1 ? $1 : $port;
+        return $port, 'IMAP';
+    } elsif ($port == 110 || $port == 995 || $port =~ m/POP3:(\d+)/i){
+        $port = $1 ? $1 : $port;
+        return $port, 'POP3';
+    } else {
+        return $port, 'UNKNOWN';
+    }
 }
 
 # Set weight to 0 and flush associations
 # Note that there's no way to kill active sessions, they'll have to time out
 # on their own.
 sub disable_host {
-	my $host = shift || return;
-	my $sock = director_connect() || return;
-	print $sock "HOST-SET\t$host\t0\n";
-	print $sock "HOST-FLUSH\t$host\n";
-	close($sock);
-	undef($sock);
-	write_log("$host disabled");
+    my $host = shift || return;
+    my $sock = director_connect() || return;
+    print $sock "HOST-SET\t$host\t0\n";
+    print $sock "HOST-FLUSH\t$host\n";
+    close($sock);
+    undef($sock);
+    write_log("$host disabled");
 }
 
 # Restore weight
 sub enable_host {
-	my $host = shift || return;
-	my $sock = director_connect() || return;
-	my $weight = exists $WEIGHTS{$host} ? $WEIGHTS{$host} : 100;
-	print $sock "HOST-SET\t$host\t$weight\n";
-	close($sock);
-	undef($sock);
-	write_log("$host enabled with weight $weight");
+    my $host = shift || return;
+    my $sock = director_connect() || return;
+    my $weight = exists $WEIGHTS{$host} ? $WEIGHTS{$host} : 100;
+    print $sock "HOST-SET\t$host\t$weight\n";
+    close($sock);
+    undef($sock);
+    write_log("$host enabled with weight $weight");
 }
 
 # Append a line to stdout
 sub write_log {
-	printf(STDOUT "%s LOG %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
+    printf(STDOUT "%s LOG %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
 }
 
 # Append a line to stderr
 sub write_err {
-	printf(STDERR "%s ERR %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
+    printf(STDERR "%s ERR %s\n", strftime("%h %d %H:%M:%S", localtime()), join('', @_));
 }
 
 # Check to see if the pidfile exists and the indicated pid is still running
 sub check_pidfile {
-	if (-e $PIDFILE){
-		my $FH;
-		open($FH, "<$PIDFILE");
-		my $oldpid = readline($FH);
-		close($FH);
-		chomp $oldpid;
-		if (-d "/proc/$oldpid"){
-			print STDERR "Error: already running as pid $oldpid\n";
-			exit(1);
-		}
-	}
+    if (-e $PIDFILE){
+        my $FH;
+        open($FH, "<$PIDFILE");
+        my $oldpid = readline($FH);
+        close($FH);
+        chomp $oldpid;
+        if (-d "/proc/$oldpid"){
+            write_err("Already running as pid $oldpid");
+            exit(1);
+        }
+    }
 }
 
 # Remove the pidfile and exit
 sub remove_pidfile {
-		return unless $PIDOPEN;
-		write_log('shutting down');
-		unlink($PIDFILE);
-		exit(0);
+        return unless $PIDOPEN;
+        write_log('Shutting down');
+        unlink($PIDFILE);
+        exit(0);
 }
 
 sub opt_weights {
-	my ($opt, $value) = @_;
-	if ( -e $value ){
-		$WEIGHTS = $value;
-		load_weights();
-	} else {
-		print STDERR "Error: weights file '$value' not found!\n";
-		exit(1);
-	}
+    my ($opt, $value) = @_;
+    if ( -e $value ){
+        $WEIGHTS = $value;
+        load_weights();
+    } else {
+        write_err("Weights file '$value' not found!");
+        exit(1);
+    }
 }
 
 sub opt_credfile {
-	my ($opt, $value)= @_;
-	if ( -e $value ){
-		$CREDFILE = $value;
-		load_credentials();
-	} else {
-		print STDERR "Error: credential file '$value' not found!\n";
-		exit(1);
-	}
+    my ($opt, $value)= @_;
+    if ( -e $value ){
+        $CREDFILE = $value;
+        load_credentials();
+    } else {
+        write_err("Credential file '$value' not found!");
+        exit(1);
+    }
 }
 
 sub load_credentials {
-	return unless $CREDFILE;
-	# Check permissions on credentials file
-	if ((stat($CREDFILE))[2] & 077){
-		write_err("WARNING: You should really chmod 600 $CREDFILE");
-	}
-	if(open(my $credfh, "<$CREDFILE")){
-		$USERNAME = readline($credfh);
-		$PASSWORD = readline($credfh);
-		close($credfh);
-		chomp($USERNAME);
-		chomp($PASSWORD);
-		if ($USERNAME && $PASSWORD){
-			$DEBUG && write_log("read credentials from $CREDFILE");
-		} else {
-			write_err("could not read username and password from $CREDFILE");
-		}
-	} else {
-		write_err("Error: could not open credential file: $!");
-	}
+    return unless $CREDFILE;
+    # Check permissions on credentials file
+    if ((stat($CREDFILE))[2] & 077){
+        write_err("You should really chmod 600 $CREDFILE");
+    }
+    if(open(my $credfh, "<$CREDFILE")){
+        $USERNAME = readline($credfh);
+        $PASSWORD = readline($credfh);
+        close($credfh);
+        chomp($USERNAME);
+        chomp($PASSWORD);
+        if ($USERNAME && $PASSWORD){
+            $DEBUG && write_log("Loaded credentials from $CREDFILE");
+        } else {
+            write_err("Could not read username and password from $CREDFILE");
+        }
+    } else {
+        write_err("Could not open credential file: $!");
+    }
 }
 
 
 
 # Parse weights file
 sub load_weights {
-	return unless $WEIGHTS;
-	if(open(my $FH, "<$WEIGHTS")){
-		my $i = 0;
-		undef(%WEIGHTS);
-		while (my $line = readline($FH)){
-			$i++;
-			if ($line =~ m/^\s*#/){
-				# Skip comments
-				next;
-			} elsif (my ($ip, $ip_weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
-				# ip entry
-				$WEIGHTS{$ip} = $ip_weight;
-				$DEBUG && write_log("will use weight $ip_weight for $ip"); 
-			} elsif (my ($hostname, $host_weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
-				# hostname entry
-				my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
-				if (@addrs){
-					foreach my $addr (@addrs){
-						my $ip = join('.', unpack('C4',$addr));
-						$WEIGHTS{$ip} = $host_weight;
-						$DEBUG && write_log("will use weight $host_weight for $hostname\[$ip\]");
-					}
-				} else {
-					write_err("failed to resolve hostname for weight entry '$hostname' at $WEIGHTS:$i");
-				}
-			} else {
-				# Complain about unmatched lines
-				write_err("ignoring malformed weight entry at $WEIGHTS:$i");
-			}
-		}
-		close($FH);
-		write_log('loaded '.scalar(keys(%WEIGHTS))." weights from $WEIGHTS");
-	} else {
-		write_err("couldn't open weights file: $!");
-	}
+    return unless $WEIGHTS;
+    if(open(my $FH, "<$WEIGHTS")){
+        my $i = 0;
+        undef(%WEIGHTS);
+        while (my $line = readline($FH)){
+            $i++;
+            if ($line =~ m/^\s*#/){
+                # Skip comments
+                next;
+            } elsif (my ($ip, $ip_weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
+                # ip entry
+                $WEIGHTS{$ip} = $ip_weight;
+                $DEBUG && write_log("Loaded weight $ip_weight for $ip");
+            } elsif (my ($hostname, $host_weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
+                # hostname entry
+                my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
+                if (@addrs){
+                    foreach my $addr (@addrs){
+                        my $ip = join('.', unpack('C4',$addr));
+                        $WEIGHTS{$ip} = $host_weight;
+                        $DEBUG && write_log("Loaded $host_weight for $hostname\[$ip\]");
+                    }
+                } else {
+                    write_err("Failed to resolve hostname for weight entry '$hostname' at $WEIGHTS:$i");
+                }
+            } else {
+                # Complain about unmatched lines
+                write_err("Ignoring malformed weight entry at $WEIGHTS:$i");
+            }
+        }
+        close($FH);
+        write_log('Loaded '.scalar(keys(%WEIGHTS))." hosts from $WEIGHTS");
+    } else {
+        write_err("Couldn't open weights file: $!");
+    }
 }
 
 # Fork into background and write pidfile
 sub daemonize {
-	my $FH;
+    my $FH;
 
-	# Open pidfile and register cleanup handlers
-	# Do this before forking so we can abort on failure
-	$PIDOPEN = open($FH, ">$PIDFILE") or die "Can't open pidfile $PIDFILE: $!";
-	$SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = $SIG{'__DIE__'} = \&remove_pidfile;
+    # Open pidfile and register cleanup handlers
+    # Do this before forking so we can abort on failure
+    $PIDOPEN = open($FH, ">$PIDFILE") or die "Can't open pidfile $PIDFILE: $!";
+    $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = $SIG{'__DIE__'} = \&remove_pidfile;
 
-	# Disconnect from terminal and session
-	chdir('/')                 or die "Can't chdir to /: $!";
-	umask(0);
-	open(STDIN, '</dev/null')  or die "Can't read /dev/null: $!";
-	open(STDOUT, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
-	open(STDERR, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
-	defined(my $pid = fork())  or die "Can't fork: $!";
-	$pid && exit(0);
-	setsid()                   or die "Can't start a new session: $!";
+    # Disconnect from terminal and session
+    chdir('/')         or die "Can't chdir to /: $!";
+    umask(0);
+    open(STDIN, '</dev/null')  or die "Can't read /dev/null: $!";
+    open(STDOUT, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
+    open(STDERR, ">>$LOGFILE") or die "Can't write to $LOGFILE: $!";
+    defined(my $pid = fork())  or die "Can't fork: $!";
+    $pid && exit(0);
+    setsid()           or die "Can't start a new session: $!";
 
-	# Write forked PID to pidfile and startup message to log
-	write_log("forked to background as PID $$");
-	print $FH "$$\n";
-	close($FH);
+    # Write forked PID to pidfile and startup message to log
+    write_log("Forked to background as PID $$");
+    print $FH "$$\n";
+    close($FH);
 
-	# Reopen logfiles and reparse weights on HUP
-	$SIG{'HUP'} = sub {
-		open(STDOUT, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
-		open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";		
-		write_log("logfile reopened");
-		load_weights();
-		load_credentials();
-	}
+    # Reopen logfiles and reparse weights on HUP
+    $SIG{'HUP'} = sub {
+        open(STDOUT, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
+        open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
+        write_log("Logfile reopened");
+        load_weights();
+        load_credentials();
+    }
 }
 
