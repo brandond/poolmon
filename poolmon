@@ -39,6 +39,7 @@ my $NOFORK   = 0;
 my $TIMEOUT  = 5;
 my $INTERVAL = 30;
 my $PIDOPEN  = 0;
+my $ORIGPID  = 0;
 my $PIDFILE  = '/var/run/poolmon.pid';
 my $LOGFILE  = '/var/log/poolmon.log';
 my $DIRECTOR = '/var/run/dovecot/director-admin';
@@ -218,7 +219,10 @@ sub scan_port {
                        Timeout  => $TIMEOUT);
 
     $ret = eval {
-        local $SIG{ALRM} = sub { die "Timeout\n" };
+        local $SIG{ALRM} = sub { 
+            $DEBUG && write_log("Timeout");
+            die "Timeout\n"; 
+        };
         alarm $TIMEOUT;
         if ($sock){
             if ($prot eq 'IMAP'){
@@ -372,10 +376,11 @@ sub check_pidfile {
 
 # Remove the pidfile and exit
 sub remove_pidfile {
-        return unless $PIDOPEN;
+    return unless $PIDOPEN;
+    if ($$ == $ORIGPID) {
         write_log('Shutting down');
         unlink($PIDFILE);
-        exit(0);
+    }
 }
 
 sub opt_weights {
@@ -470,7 +475,18 @@ sub daemonize {
     # Open pidfile and register cleanup handlers
     # Do this before forking so we can abort on failure
     $PIDOPEN = open($FH, ">$PIDFILE") or die "Can't open pidfile $PIDFILE: $!";
-    $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = $SIG{'__DIE__'} = \&remove_pidfile;
+    $SIG{'INT'} = sub {
+        $DEBUG && write_log("Caught signal INT");
+        remove_pidfile();
+    };
+    $SIG{'QUIT'} = sub {
+        $DEBUG && write_log("Caught signal QUIT");
+        remove_pidfile();
+    };
+    $SIG{'TERM'} = sub {
+        $DEBUG && write_log("Caught signal TERM");
+        remove_pidfile();
+    };
 
     # Disconnect from terminal and session
     chdir('/')         or die "Can't chdir to /: $!";
@@ -486,6 +502,7 @@ sub daemonize {
     write_log("Forked to background as PID $$");
     print $FH "$$\n";
     close($FH);
+    $ORIGPID = $$;
 
     # Reopen logfiles and reparse weights on HUP
     $SIG{'HUP'} = sub {
@@ -497,3 +514,6 @@ sub daemonize {
     }
 }
 
+END {
+    remove_pidfile();
+}
