@@ -1,0 +1,17 @@
+[Unit]
+Description=Poolmon monitors a pool of Dovecot director mailservers \
+ and dynamically alters their state based on active health \
+ checks performed at regular intervals.
+After=syslog.target network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/poolmon
+WorkingDirectory=/
+ExecStart=/usr/sbin/poolmon -f $OPTIONS
+Restart=on-failure
+LimitNOFILE=10000
+
+[Install]
+WantedBy=multi-user.target
+

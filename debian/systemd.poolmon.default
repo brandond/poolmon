@@ -1,0 +1,4 @@
+# Here you can specify your poolmon command line options.
+#
+[Service]
+OPTIONS=""
