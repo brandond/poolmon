@@ -48,8 +48,6 @@ my $USERNAME = '';
 my $PASSWORD = '';
 my $LMTP_FROM = '';
 my $LMTP_TO = '';
-my $WEIGHTS;
-my %WEIGHTS;
 
 Getopt::Long::Configure("bundling");
 GetOptions('p|port=s'     => \@PORTS,
@@ -62,7 +60,6 @@ GetOptions('p|port=s'     => \@PORTS,
            'f|foreground' => \$NOFORK,
            'S|socket=s'   => \$DIRECTOR,
            'h|help|?'     => \&help,
-           'w|weights=s'  => \&opt_weights,
            'c|credfile=s' => \&opt_credfile,
            'lmtp-from=s'  => \$LMTP_FROM,
            'lmtp-to=s'    => \$LMTP_TO,
@@ -99,9 +96,9 @@ Retrieves a set of mailserver hosts from a Dovecot director and performs
 parallel checks against a list of ports.
 
 If any port on a host cannot be connected to or fails to present a banner line
-within the timeout period, that host is disabled by setting the weight (or vhost
-count, in Dovecot terms) to 0, and flushing active mappings from that host. If
-a disabled host passes all host checks, its weight is restored.
+within the timeout period, that host is disabled by setting its status to
+'down', and flushing active mappings from that host. If a disabled host passes
+all host checks, its status is restored to 'up'.
 
 Arguments:
   -d, --debug           Show additional logging (default: false)
@@ -127,8 +124,6 @@ Arguments:
   -S, --socket=PATH     Path to Dovecot director-admin socket
                         (default: /var/run/dovecot/director-admin)
   -t, --timeout=SECS    Port health check timeout in seconds (default: 5)
-  -w, --weights=PATH    Location of file containing host:weight lines
-                        (default: weight of 100)
 ";
     exit(1);
 }
@@ -151,12 +146,12 @@ sub scan_host_loop {
 
     # Start host scans
     foreach my $line (@lines){
-        if(my ($host, $weight, $clients) = split("\t", $line)){
+        if(my ($host, $weight, $clients, $tag, $updown) = split("\t", $line)){
             my $pid = fork();
             if ($pid == 0) {
-                exit(scan_host($host, $weight));
+                exit(scan_host($host, $updown));
             } elsif ($pid > 0) {
-                $CHILDREN{$pid} = [$host, $weight];
+                $CHILDREN{$pid} = [$host, $updown];
             } else {
                 write_err("Failed to fork scan process for host $host: $!");
             }
@@ -167,12 +162,12 @@ sub scan_host_loop {
     while(my $pid = wait()){
         my $OK = $? >> 8;
         last if $pid == -1;
-        my ($host, $weight) = @{$CHILDREN{$pid}};
-        $DEBUG && write_log("Scan of host $host with weight $weight by PID $pid exited with status $OK");
-        if ($OK) { # Enable host if currently disabled (weighted 0)
-            $weight || enable_host($host);
-        } else {  # Disable host if currently enabled (weighted non-0)
-            $weight && disable_host($host);
+        my ($host, $updown) = @{$CHILDREN{$pid}};
+        $DEBUG && write_log("Scan of host $host with status $updown by PID $pid exited with status $OK");
+        if ($OK) { # Enable host if currently disabled (updown=D)
+            enable_host($host) if $updown eq "D";
+        } else {  # Disable host if currently enabled (updown=U)
+            disable_host($host) if $updown eq "U";
         }
         undef($CHILDREN{$pid});
     }
@@ -197,7 +192,7 @@ sub director_connect {
 
 # Scan all ports on a given host. 1 == success. 0 == failure
 sub scan_host {
-    my ($host, $weight) = @_;
+    my ($host, $updown) = @_;
     my $OK = 1;
     # Check non-SSL ports first
     foreach my $port (@PORTS){
@@ -389,28 +384,27 @@ sub get_port_proto {
     }
 }
 
-# Set weight to 0 and flush associations
+# Mark host down and flush associations
 # Note that there's no way to kill active sessions, they'll have to time out
 # on their own.
 sub disable_host {
     my $host = shift || return;
     my $sock = director_connect() || return;
-    print $sock "HOST-SET\t$host\t0\n";
+    print $sock "HOST-DOWN\t$host\n";
     print $sock "HOST-FLUSH\t$host\n";
     close($sock);
     undef($sock);
     write_log("$host disabled");
 }
 
-# Restore weight
+# Mark host as up
 sub enable_host {
     my $host = shift || return;
     my $sock = director_connect() || return;
-    my $weight = exists $WEIGHTS{$host} ? $WEIGHTS{$host} : 100;
-    print $sock "HOST-SET\t$host\t$weight\n";
+    print $sock "HOST-UP\t$host\n";
     close($sock);
     undef($sock);
-    write_log("$host enabled with weight $weight");
+    write_log("$host enabled");
 }
 
 # Append a line to stdout
@@ -466,17 +460,6 @@ sub remove_pidfile {
     }
 }
 
-sub opt_weights {
-    my ($opt, $value) = @_;
-    if ( -e $value ){
-        $WEIGHTS = $value;
-        load_weights();
-    } else {
-        write_err("Weights file '$value' not found!");
-        exit(1);
-    }
-}
-
 sub opt_credfile {
     my ($opt, $value)= @_;
     if ( -e $value ){
@@ -511,45 +494,6 @@ sub load_credentials {
 }
 
 
-
-# Parse weights file
-sub load_weights {
-    return unless $WEIGHTS;
-    if(open(my $FH, "<$WEIGHTS")){
-        my $i = 0;
-        undef(%WEIGHTS);
-        while (my $line = readline($FH)){
-            $i++;
-            if ($line =~ m/^\s*#/){
-                # Skip comments
-                next;
-            } elsif (my ($ip, $ip_weight) = $line =~ m/^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)/){
-                # ip entry
-                $WEIGHTS{$ip} = $ip_weight;
-                $DEBUG && write_log("Loaded weight $ip_weight for $ip");
-            } elsif (my ($hostname, $host_weight) = $line =~ m/^\s*([a-zA-Z0-9._-]+):(\d+)/){
-                # hostname entry
-                my ($name,$aliases,$addrtype,$length,@addrs) = gethostbyname($hostname);
-                if (@addrs){
-                    foreach my $addr (@addrs){
-                        my $ip = join('.', unpack('C4',$addr));
-                        $WEIGHTS{$ip} = $host_weight;
-                        $DEBUG && write_log("Loaded $host_weight for $hostname\[$ip\]");
-                    }
-                } else {
-                    write_err("Failed to resolve hostname for weight entry '$hostname' at $WEIGHTS:$i");
-                }
-            } else {
-                # Complain about unmatched lines
-                write_err("Ignoring malformed weight entry at $WEIGHTS:$i");
-            }
-        }
-        close($FH);
-        write_log('Loaded '.scalar(keys(%WEIGHTS))." hosts from $WEIGHTS");
-    } else {
-        write_err("Couldn't open weights file: $!");
-    }
-}
 
 # Fork into background and write pidfile
 sub daemonize {
@@ -589,14 +533,13 @@ sub daemonize {
     close($FH);
     $ORIGPID = $$;
 
-    # Reopen logfiles and reparse weights on HUP
+    # Reopen logfiles on HUP
     $SIG{'HUP'} = sub {
         if ($LOGFILE ne "syslog") {
           open(STDOUT, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
           open(STDERR, ">>$LOGFILE") or die "Can't reopen $LOGFILE: $!";
         }
         write_log("Logfile reopened");
-        load_weights();
         load_credentials();
     }
 }
