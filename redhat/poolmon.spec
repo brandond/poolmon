@@ -1,5 +1,5 @@
 Name: poolmon
-Version:  0.5
+Version:  0.6
 Release:  1%{?dist}
 Summary: poolmon is a director mailserver pool monitoring script for Dovecot
 
