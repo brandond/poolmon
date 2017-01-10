@@ -14,6 +14,7 @@ BuildArch: noarch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 Requires: dovecot
 Requires: perl(IO::Socket::SSL)
+Requires: perl(IO::Socket::INET6)
 
 %description
 Poolmon is a director mailserver pool monitoring script for Dovecot, meant to

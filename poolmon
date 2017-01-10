@@ -26,7 +26,7 @@
 use strict;
 use Getopt::Long;
 use IO::Socket::UNIX;
-use IO::Socket::IP;
+use IO::Socket::INET6;
 use POSIX qw(setsid strftime);
 use Sys::Syslog qw( :DEFAULT setlogsock);
 
@@ -230,7 +230,7 @@ sub scan_port {
     my $host = shift || return;
     my $port = shift || return;
     my $ssl  = shift;
-    my $sock = $ssl ? IO::Socket::SSL : IO::Socket::IP;
+    my $sock = $ssl ? IO::Socket::SSL : IO::Socket::INET6;
     my $prot;
     my $ret;
 
